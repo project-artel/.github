@@ -1,0 +1,2 @@
+# .env.example을 채운 사본. GitHub OAuth client secret과 JWT 서명 secret이 들어간다.
+.env
