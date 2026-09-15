@@ -1,0 +1,131 @@
+# ARTEL 전체 stack을 한 machine에 띄운다. datastore 둘과 ghcr.io에 올라간 service
+# image 넷이다.
+#
+# 이 파일 옆에 .env.example을 .env로 복사하고, 기동을 막는 값 셋을 채운 뒤
+# `docker compose up -d`를 돌린다. 절차는 profile/README.md에 있다.
+
+name: artel
+
+services:
+  postgres:
+    # 반드시 pgvector image여야 한다. 마이그레이션 V18이 `CREATE EXTENSION vector`를
+    # 돌리므로, 기본 `postgres` image에서는 그 지점부터 모든 마이그레이션이 실패하고
+    # orchestration이 끝내 뜨지 못한다.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${DB_NAME:-artel}
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # orchestration은 기동 시점에 Flyway를 돌리고, database가 아직 연결을 받지
+      # 않으면 그대로 죽는다. 그래서 container가 있기만 한 것이 아니라 이 검사가
+      # 통과하기를 기다린다.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d ${DB_NAME:-artel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    # SDK 일회용 login code를 담는다. 없으면 orchestration은 정상적으로 뜨고 대부분의
+    # API도 도는데 POST /api/auth/sdk/codes만 500을 낸다 — SDK onboarding이 원인 없이
+    # 깨지는 모양이 이것이다.
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  orchestration:
+    image: ghcr.io/project-artel/orchestration:${ARTEL_IMAGE_TAG:-develop}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-artel}
+      DB_USERNAME: ${DB_USERNAME:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      REDIS_URL: redis://redis:6379
+
+      # localhost가 아니라 service 이름이다. container 안에서 localhost는 그
+      # container 자신이다.
+      ARTEL_AGENT_BASE_URL: http://agent:8080
+      ARTEL_AGENT_WS_BASE_URL: ws://agent:8080
+
+      # 이 둘은 브라우저가 보는 origin이라 service 이름이 아니라 사람이 주소창에 치는
+      # 주소다. CORS는 브라우저가 보내는 Origin header와 맞춰 본다.
+      ARTEL_HOME_URL: http://localhost:${CONSOLE_PORT:-5173}
+      ARTEL_ALLOWED_ORIGINS: http://localhost:${CONSOLE_PORT:-5173},http://localhost:${ADMIN_PORT:-5174}
+
+      # application.yml에 기본값이 없다. 셋 중 하나라도 비면 server가 기동에
+      # 실패한다. secret은 32바이트 이상이어야 한다.
+      ARTEL_JWT_SECRET: ${ARTEL_JWT_SECRET}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+
+      # 여기서는 session cookie가 평문 http로 오간다. true로 두면 브라우저가 그
+      # cookie를 버리고, 그 증상은 "로그인이 아무 말 없이 아무 일도 안 한다"로 보인다.
+      ARTEL_SECURE_COOKIE: "false"
+    ports:
+      # 공개 포트 하나만 게시한다.
+      #
+      # 내부 API(`/internal/**`)는 8081에서 서빙되며 이 목록에 일부러 없다. 그 경로들은
+      # 설계상 무인증이고 — 부르는 쪽이 사람이 아니라 server다 — 그것을 network에서
+      # 떼어 놓는 유일한 근거가 아무것도 8081을 게시하지 않는다는 사실이다. 같은
+      # compose network의 container는 그대로 닿으며, agent가 그 경로로 부른다.
+      #
+      # 8081을 여기 추가하지 마라.
+      - "${ORCHESTRATION_PORT:-8080}:8080"
+
+  agent:
+    image: ghcr.io/project-artel/agent:${ARTEL_IMAGE_TAG:-develop}
+    depends_on:
+      - orchestration
+    environment:
+      APP_ENV: local
+      APP_PORT: "8080"
+
+      # 비어 있어도 된다. server는 뜨고 model 호출만 실패한다. QA 런, 시나리오 저작,
+      # 지식 추출을 돌리기 전에 채운다.
+      LLM_API_KEY: ${LLM_API_KEY:-}
+
+      # 8080이 아니라 내부 포트다. 이 server가 부르는 두 경로 — /internal/llm-usage와
+      # /internal/projects/:id/game-builds/:id/scene-context — 는 거기에만 있고 공개
+      # 포트는 그 경로에 404를 준다.
+      ORCHESTRATION_BASE_URL: http://orchestration:8081
+
+      REDIS_URL: redis://redis:6379/0
+      LANGSMITH_TRACING: "false"
+    ports:
+      - "${AGENT_PORT:-8000}:8080"
+
+  console:
+    image: ghcr.io/project-artel/console:${ARTEL_IMAGE_TAG:-develop}
+    environment:
+      # 이 호출을 보내는 것은 브라우저다. 그래서 브라우저에서 통하는 주소여야 하고,
+      # compose network 안에서만 풀리는 `orchestration` service 이름은 안 된다. image는
+      # 빌드 시점에 placeholder를 굽고 entrypoint가 기동할 때 이 값으로 바꾼다 — 그래서
+      # image 하나가 모든 환경을 덮는다.
+      VITE_ORCHESTRATION_URL: http://localhost:${ORCHESTRATION_PORT:-8080}
+    ports:
+      - "${CONSOLE_PORT:-5173}:8080"
+
+  admin:
+    image: ghcr.io/project-artel/admin:${ARTEL_IMAGE_TAG:-develop}
+    environment:
+      VITE_ORCHESTRATION_URL: http://localhost:${ORCHESTRATION_PORT:-8080}
+      VITE_HOME_URL: http://localhost:${CONSOLE_PORT:-5173}
+    ports:
+      - "${ADMIN_PORT:-5174}:8080"
+
+# frontend 둘에는 depends_on이 없다. nginx가 정적 파일만 서빙하고 orchestration을
+# 부르는 것은 그들이 아니라 브라우저다. 기다리게 해 봐야 stack만 늦어진다.
+
+volumes:
+  postgres-data:
