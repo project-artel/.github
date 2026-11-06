@@ -4,6 +4,11 @@ ARTEL은 QA agent가 Unity 게임을 직접 플레이해 테스트하는 도구�
 
 [ARTEL](https://artel.kr) · [Unity SDK 설치](https://github.com/project-artel/artel-sdk#install) · [Docker 설치](https://github.com/project-artel/artel/tree/main/deploy)
 
+## Unity SDK와 QA 벤치마크
+
+- **게임 코드 수정 없이 SDK 연결.** Unity Package Manager에서 패키지를 설치하면 에디터와 개발 빌드에 SDK가 붙습니다. [Unity SDK](https://github.com/project-artel/artel-sdk#install)
+- **WordVenture 테스트 35개, 시나리오 4개.** 세이브·리셋부터 엔딩까지 다룹니다. 게임에서 충족할 수 없는 기대 조건도 넣어, agent가 실패를 통과로 보고하는지 확인합니다. [벤치마크와 정답표](https://github.com/project-artel/artel/tree/main/benchmarks)
+
 ## QA 실행 흐름
 
 ```mermaid
